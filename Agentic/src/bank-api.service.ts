@@ -102,7 +102,11 @@ export class BankApiService {
       return next();
     });
 
-    this.startServer();
+    this.setupRoutes();
+  }
+
+  public getApp(): Express {
+    return this.app;
   }
 
   private setupRoutes() {
