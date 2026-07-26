@@ -22,6 +22,12 @@ export class BankApiService {
     this.app.use(cors());
     this.app.use(express.json());
 
+    // Serve the full Bank SRE Command Center UI directly on root route /
+    this.app.get('/', (req, res) => {
+      const widgetPath = path.join(process.cwd(), 'src/widgets/out', 'aegis-kinetic-canvas.html');
+      res.sendFile(widgetPath);
+    });
+
     // Explicitly serve widgets from Next.js export for NitroStudio's proxy
     this.app.get('/widgets/:widgetName', (req, res) => {
       const widgetName = req.params.widgetName;
