@@ -43,7 +43,12 @@ export class BankApiService {
     this.app.use(cors());
     this.app.use(express.json());
 
-    // PRODUCTION ROUTING FIX (3): Serve static frontend assets dynamically from build/public directories
+    // PRODUCTION ROUTING FIX (3): Serve static frontend assets & Next.js JS chunks dynamically
+    this.app.use('/_next', express.static(path.join(process.cwd(), 'src/widgets/out/_next')));
+    this.app.use('/_next', express.static(path.join(process.cwd(), 'widgets/out/_next')));
+    this.app.use('/_next', express.static(path.join(process.cwd(), 'dist/widgets/out/_next')));
+    this.app.use('/_next', express.static(path.join(process.cwd(), 'out/_next')));
+
     this.app.use(express.static(path.join(process.cwd(), 'src/widgets/out')));
     this.app.use(express.static(path.join(process.cwd(), 'widgets/out')));
     this.app.use(express.static(path.join(process.cwd(), 'dist/widgets/out')));

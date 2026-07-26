@@ -43,7 +43,12 @@ async function bootstrap() {
     if (httpTransport && typeof httpTransport.getApp === 'function') {
       const expressApp = httpTransport.getApp();
       if (expressApp) {
-        // PRODUCTION ROUTING FIX (3): Serve static frontend assets dynamically from build/public directories
+        // PRODUCTION ROUTING FIX (3): Serve static frontend assets & Next.js JS chunks dynamically
+        expressApp.use('/_next', express.static(path.join(process.cwd(), 'src/widgets/out/_next')));
+        expressApp.use('/_next', express.static(path.join(process.cwd(), 'widgets/out/_next')));
+        expressApp.use('/_next', express.static(path.join(process.cwd(), 'dist/widgets/out/_next')));
+        expressApp.use('/_next', express.static(path.join(process.cwd(), 'out/_next')));
+
         expressApp.use(express.static(path.join(process.cwd(), 'src/widgets/out')));
         expressApp.use(express.static(path.join(process.cwd(), 'widgets/out')));
         expressApp.use(express.static(path.join(process.cwd(), 'dist/widgets/out')));
