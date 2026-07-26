@@ -84,11 +84,12 @@ app.get('/metrics', (req, res) => {
   });
 });
 
-// PRODUCTION DEPLOYMENT PATCH (1. Host Binding & Port Configuration):
-// Listen on process.env.PORT with 3000 fallback, explicitly bound to '0.0.0.0'
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-app.listen(PORT, '0.0.0.0', async () => {
-  console.log(`Legacy Core Server listening on port ${PORT} bound to 0.0.0.0`);
+// PRODUCTION DEPLOYMENT PATCH: Host Binding & Dynamic Port Assignment
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = '0.0.0.0';
+
+app.listen(PORT, HOST, async () => {
+  console.log(`Server listening on http://${HOST}:${PORT}`);
   // Wait a sec for DB to be up if starting concurrently
   setTimeout(seed, 2000);
 });

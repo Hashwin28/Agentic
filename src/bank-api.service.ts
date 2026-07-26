@@ -171,12 +171,13 @@ export class BankApiService {
 
   private startServer() {
     try {
-      // PRODUCTION DEPLOYMENT PATCH (1. Host Binding & Port Configuration):
-      // Listen on process.env.PORT dynamically with fallback to 3000, and explicitly bind to '0.0.0.0'
-      // instead of 'localhost' or '127.0.0.1' so container ingress and cloud health checks can reach the API.
-      const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : (process.env.BANK_API_PORT ? parseInt(process.env.BANK_API_PORT, 10) : 3000);
-      this.server = this.app.listen(PORT, '0.0.0.0', () => {
-        console.log(`[AEGIS] Replicate Bank System API listening on port ${PORT} bound to 0.0.0.0`);
+      // PRODUCTION DEPLOYMENT PATCH: Host Binding & Dynamic Port Assignment
+      // Listens on process.env.PORT dynamically with 3000 fallback, explicitly bound to '0.0.0.0' for container health checks
+      const PORT = Number(process.env.PORT) || 3000;
+      const HOST = '0.0.0.0';
+
+      this.server = this.app.listen(PORT, HOST, () => {
+        console.log(`Server listening on http://${HOST}:${PORT}`);
       });
       this.server.on('error', (err: any) => {
         console.warn(`[AEGIS] Bank API server note: ${err.message}`);
