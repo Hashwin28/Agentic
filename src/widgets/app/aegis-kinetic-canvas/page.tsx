@@ -1,365 +1,514 @@
 'use client';
 
-import React, { useCallback, useEffect, useState, useRef } from 'react';
-import { useWidgetSDK } from '@nitrostack/widgets';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import { 
+  LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine 
+} from 'recharts';
+import { 
+  ShieldAlert, ShieldCheck, Activity, Cpu, Database, RefreshCw, Zap,
+  Terminal, AlertTriangle, FileText, Lock, Radio, Play
+} from 'lucide-react';
+import { AegisMcpClient, TelemetryData, SwarmEvent } from '../lib/mcpClient';
 
-type Tab = 'dashboard' | 'ledger' | 'simulations' | 'log' | 'audit';
+const MCP_CLOUD_URL = 'https://agentic-6a6551d9-hashwins-org-0dcc4106.app.nitrocloud.ai/mcp';
 
-export default function AegisDashboard() {
-  const sdk = useWidgetSDK();
-  const [activeTab, setActiveTab] = useState<Tab>('dashboard');
+interface MetricHistoryPoint {
+  time: string;
+  queueDepth: number;
+  threadOccupancy: number;
+  dbSaturation: number;
+  retryRate: number;
+  residualNorm: number;
+}
+
+export default function AegisControlPanel() {
+  // Client instance
+  const [mcpClient] = useState(() => new AegisMcpClient(MCP_CLOUD_URL, (connected) => setIsConnected(connected)));
   
-  // Data State
-  const [telemetry, setTelemetry] = useState<any>(null);
-  const [swarmLog, setSwarmLog] = useState<any[]>([]);
-  const [ledger, setLedger] = useState<any[]>([]);
+  // System State
+  const [isConnected, setIsConnected] = useState<boolean>(true);
+  const [liveValidationMode, setLiveValidationMode] = useState<boolean>(false);
+  const [systemStatus, setSystemStatus] = useState<'NOMINAL' | 'ANOMALY_DETECTED' | 'REMEDIATING' | 'RECOVERED'>('NOMINAL');
   
-  // Sub-polling
-  const fetchTelemetry = useCallback(async () => {
-    try {
-      const res = await sdk.callTool('get_orbital_subspace', {});
-      if (res && res.result) {
-        // MCP tools return content in the result string or structuredContent.
-        // But since we will add @Tool to it, it returns the object directly if we format it right.
-        const parsed = typeof res.result === 'string' ? JSON.parse(res.result) : res.result;
-        // In our backend, the tool will return the JSON directly or in a string.
-        setTelemetry(parsed.content ? JSON.parse(parsed.content[0].text) : parsed);
-      }
-    } catch (e) {}
-  }, [sdk]);
+  // Real-time Data
+  const [currentTelemetry, setCurrentTelemetry] = useState<TelemetryData | null>(null);
+  const [metricHistory, setMetricHistory] = useState<MetricHistoryPoint[]>([]);
+  const [swarmLogs, setSwarmLogs] = useState<SwarmEvent[]>([]);
+  
+  // Active Shields State (Optimistic + Polled)
+  const [shields, setShields] = useState({
+    singleFlight: { active: false, count: 1420 },
+    idempotency: { active: false, blocked: 89 },
+    qosShunting: { active: false, shedRatio: '10%' },
+    circuitBreaker: { active: false, status: 'CLOSED' }
+  });
 
-  const fetchLog = useCallback(async () => {
-    try {
-      const res = await sdk.callTool('get_swarm_log', {});
-      if (res && res.result) {
-        const parsed = typeof res.result === 'string' ? JSON.parse(res.result) : res.result;
-        setSwarmLog(parsed.content ? JSON.parse(parsed.content[0].text) : parsed);
-      }
-    } catch (e) {}
-  }, [sdk]);
+  // UI Modal State
+  const [showRcaModal, setShowRcaModal] = useState<boolean>(false);
+  const [rcaReport, setRcaReport] = useState<any | null>(null);
+  const [activeAction, setActiveAction] = useState<string | null>(null);
 
-  const fetchLedger = useCallback(async () => {
+  // ──────────────────────────────────────────────────────────────────────────
+  // Data Polling Loop
+  // ──────────────────────────────────────────────────────────────────────────
+  const pollTelemetry = useCallback(async () => {
     try {
-      const res = await sdk.callTool('get_ledger_state', {});
-      if (res && res.result) {
-        const parsed = typeof res.result === 'string' ? JSON.parse(res.result) : res.result;
-        setLedger(parsed.content ? JSON.parse(parsed.content[0].text) : parsed);
+      const data: TelemetryData = await mcpClient.callTool('get_orbital_subspace', {});
+      if (data && data.telemetry_analysis) {
+        setCurrentTelemetry(data);
+        setSystemStatus(data.system_status);
+
+        const vector = data.telemetry_analysis.normalized_vector;
+        const norm = data.telemetry_analysis.svd_residual_norm;
+        const timeStr = new Date().toLocaleTimeString('en-US', { hour12: false, minute: '2-digit', second: '2-digit' });
+
+        setMetricHistory(prev => {
+          const next = [...prev, {
+            time: timeStr,
+            queueDepth: Math.max(0, vector[0] || 0),
+            threadOccupancy: Math.max(0, vector[1] || 0),
+            dbSaturation: Math.max(0, vector[2] || 0),
+            retryRate: Math.max(0, vector[3] || 0),
+            residualNorm: norm || 0
+          }];
+          return next.slice(-25); // Keep last 25 time ticks
+        });
       }
-    } catch (e) {}
-  }, [sdk]);
+    } catch (_) {}
+  }, [mcpClient]);
+
+  const pollLogs = useCallback(async () => {
+    try {
+      const res = await mcpClient.callTool('get_swarm_log', {});
+      if (res && res.events) {
+        setSwarmLogs(res.events);
+      }
+    } catch (_) {}
+  }, [mcpClient]);
+
+  const pollHealthChecks = useCallback(async () => {
+    try {
+      const res = await mcpClient.readResource('health://checks');
+      if (res && res.checks) {
+        setShields(prev => ({
+          ...prev,
+          singleFlight: { ...prev.singleFlight, active: res.checks.find((c: any) => c.name === 'singleFlightShield')?.status === 'active' },
+          qosShunting: { ...prev.qosShunting, active: res.checks.find((c: any) => c.name === 'qosShunting')?.status === 'active' },
+          idempotency: { ...prev.idempotency, active: res.checks.find((c: any) => c.name === 'idempotencyShield')?.status === 'active' }
+        }));
+      }
+    } catch (_) {}
+  }, [mcpClient]);
 
   useEffect(() => {
-    const int1 = setInterval(fetchTelemetry, 1000);
-    const int2 = setInterval(fetchLog, 1500);
-    if (activeTab === 'ledger') fetchLedger();
-    return () => { clearInterval(int1); clearInterval(int2); };
-  }, [fetchTelemetry, fetchLog, activeTab, fetchLedger]);
+    const t1 = setInterval(pollTelemetry, 1000);
+    const t2 = setInterval(pollLogs, 1500);
+    const t3 = setInterval(pollHealthChecks, 2000);
+    return () => { clearInterval(t1); clearInterval(t2); clearInterval(t3); };
+  }, [pollTelemetry, pollLogs, pollHealthChecks]);
 
-  // Icons
-  const IconHome = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>);
-  const IconTable = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>);
-  const IconActivity = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>);
-  const IconTerminal = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>);
-  const IconShield = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>);
+  // ──────────────────────────────────────────────────────────────────────────
+  // Action Triggers
+  // ──────────────────────────────────────────────────────────────────────────
+  const handleTriggerAction = async (toolName: string, label: string) => {
+    setActiveAction(toolName);
+    try {
+      await mcpClient.callTool(toolName, {});
+    } catch (err: any) {
+      alert(`Action failed: ${err.message}`);
+    } finally {
+      setTimeout(() => setActiveAction(null), 1000);
+    }
+  };
+
+  const handleToggleMode = async () => {
+    const nextMode = !liveValidationMode;
+    setLiveValidationMode(nextMode);
+    try {
+      await mcpClient.callTool('set_simulation_mode', { mode: nextMode ? 'live' : 'mock' });
+    } catch (_) {}
+  };
+
+  const handleGenerateRca = async () => {
+    try {
+      const currentNorm = currentTelemetry?.telemetry_analysis?.svd_residual_norm || 18.42;
+      const res = await mcpClient.callTool('generate_compliance_rca', {
+        incidentId: `INC-${Math.floor(100000 + Math.random() * 900000)}`,
+        resolution: 'Staged multi-agent cascade deployed SingleFlight, QoS Shunting, and Idempotency guards.',
+        residualNorm: currentNorm,
+        activeShields: ['SingleFlightGate', 'QosShunting', 'IdempotencyEnforcer'],
+        anomalyTimestamp: new Date().toISOString()
+      });
+      setRcaReport(res);
+      setShowRcaModal(true);
+    } catch (err: any) {
+      alert(`RCA Generation failed: ${err.message}`);
+    }
+  };
+
+  // Status badge styling helper
+  const statusBadgeStyle = useMemo(() => {
+    switch (systemStatus) {
+      case 'ANOMALY_DETECTED': return 'bg-amber-500/20 text-amber-400 border-amber-500/40 animate-pulse';
+      case 'REMEDIATING': return 'bg-purple-500/20 text-purple-400 border-purple-500/40 animate-pulse';
+      case 'RECOVERED': return 'bg-cyan-500/20 text-cyan-400 border-cyan-500/40';
+      default: return 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40';
+    }
+  }, [systemStatus]);
+
+  const currentResidual = currentTelemetry?.telemetry_analysis?.svd_residual_norm || 0;
+  const isAnomalyBreached = currentResidual > 15.0;
 
   return (
-    <div style={{ display: 'flex', height: '100vh', fontFamily: 'system-ui, -apple-system, sans-serif', backgroundColor: '#f8fafc', color: '#334155' }}>
+    <div className="min-h-screen bg-[#0B0F19] text-slate-100 font-sans p-4 lg:p-6 space-y-6">
       
-      {/* LEFT SIDEBAR */}
-      <div style={{ width: '240px', backgroundColor: '#ffffff', borderRight: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ padding: '20px', borderBottom: '1px solid #e2e8f0', fontWeight: 'bold', fontSize: '18px', color: '#0f172a' }}>
-          AEGIS OPS CONSOLE
+      {/* ────────────────────────────────────────────────────────────────────────── */}
+      {/* 1. HEADER / SYSTEM STATUS BAR */}
+      {/* ────────────────────────────────────────────────────────────────────────── */}
+      <header className="bg-[#1E293B]/70 backdrop-blur border border-slate-800 rounded-xl p-4 flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">
+        <div className="flex items-center space-x-3">
+          <div className="p-2.5 bg-purple-600/20 border border-purple-500/30 rounded-lg">
+            <ShieldAlert className="w-6 h-6 text-purple-400" />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold text-white tracking-wide">Project Aegis</h1>
+            <p className="text-xs text-slate-400">Core Banking SRE Command Center • NitroStack MCP</p>
+          </div>
         </div>
-        <nav style={{ padding: '16px 8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <NavItem active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} icon={<IconHome />} label="Dashboard" />
-          <NavItem active={activeTab === 'ledger'} onClick={() => setActiveTab('ledger')} icon={<IconTable />} label="Ledger" />
-          <NavItem active={activeTab === 'simulations'} onClick={() => setActiveTab('simulations')} icon={<IconActivity />} label="Simulations" />
-          <NavItem active={activeTab === 'log'} onClick={() => setActiveTab('log')} icon={<IconTerminal />} label="Swarm Log" />
-          <NavItem active={activeTab === 'audit'} onClick={() => setActiveTab('audit')} icon={<IconShield />} label="Audit / Authorize" />
-        </nav>
+
+        {/* Live Cloud Connection Indicator */}
+        <div className="flex items-center space-x-6">
+          <div className="flex items-center space-x-2 text-xs bg-slate-900/60 px-3 py-1.5 rounded-full border border-slate-800">
+            <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400 animate-ping' : 'bg-red-500'}`} />
+            <span className="text-slate-400">Cloud MCP:</span>
+            <span className="font-mono text-cyan-400 truncate max-w-[200px]">nitrocloud.ai/mcp</span>
+          </div>
+
+          {/* Dynamic Status Badge */}
+          <div className={`px-4 py-1.5 rounded-lg border text-xs font-bold tracking-wider flex items-center space-x-2 ${statusBadgeStyle}`}>
+            <Radio className="w-3.5 h-3.5" />
+            <span>{systemStatus}</span>
+          </div>
+
+          {/* Mode Toggle */}
+          <div className="flex items-center space-x-2 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800">
+            <span className="text-xs text-slate-400">Live Validation</span>
+            <button 
+              onClick={handleToggleMode}
+              className={`w-11 h-6 flex items-center rounded-full p-1 transition-colors duration-300 ${liveValidationMode ? 'bg-purple-600' : 'bg-slate-700'}`}
+            >
+              <div className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform duration-300 ${liveValidationMode ? 'translate-x-5' : 'translate-x-0'}`} />
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* ────────────────────────────────────────────────────────────────────────── */}
+      {/* 2. TOP GRID — LIVE TELEMETRY & SVD RESIDUAL CHARTS */}
+      {/* ────────────────────────────────────────────────────────────────────────── */}
+      {isAnomalyBreached && (
+        <div className="bg-red-500/10 border border-red-500/50 rounded-xl p-4 flex items-center justify-between text-red-400 text-sm animate-bounce">
+          <div className="flex items-center space-x-3">
+            <AlertTriangle className="w-5 h-5 text-red-400 flex-shrink-0" />
+            <span><strong>CRITICAL ANOMALY BREACH:</strong> SVD Subspace Residual Norm ({currentResidual.toFixed(2)}) has breached the 15.0 threshold! Autonomic SRE shield cascade engaging.</span>
+          </div>
+          <span className="font-mono text-xs bg-red-950 px-2.5 py-1 rounded border border-red-800">THRESHOLD: 15.0</span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Chart 1: 4D Telemetry Metrics */}
+        <div className="bg-[#1E293B]/60 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <Activity className="w-4 h-4 text-cyan-400" />
+              <h2 className="text-sm font-semibold text-slate-200">4D Telemetry Vector Stream</h2>
+            </div>
+            <div className="flex items-center space-x-3 text-[11px] text-slate-400 font-mono">
+              <span className="text-cyan-400">● Queue</span>
+              <span className="text-purple-400">● Threads</span>
+              <span className="text-amber-400">● DB Sat</span>
+              <span className="text-rose-400">● Retries</span>
+            </div>
+          </div>
+          
+          <div className="h-60 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={metricHistory}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis dataKey="time" stroke="#64748B" tick={{ fontSize: 10 }} />
+                <YAxis stroke="#64748B" tick={{ fontSize: 10 }} domain={[0, 100]} />
+                <Tooltip contentStyle={{ backgroundColor: '#0B0F19', borderColor: '#334155', fontSize: '12px' }} />
+                <Line type="monotone" dataKey="queueDepth" stroke="#06B6D4" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="threadOccupancy" stroke="#8B5CF6" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="dbSaturation" stroke="#F59E0B" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="retryRate" stroke="#F43F5E" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Chart 2: Incremental SVD Residual Norm */}
+        <div className="bg-[#1E293B]/60 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <Zap className="w-4 h-4 text-purple-400" />
+              <h2 className="text-sm font-semibold text-slate-200">Incremental SVD Residual Error Norm ‖(I - P_S)x‖</h2>
+            </div>
+            <span className="font-mono text-xs text-purple-400 font-bold bg-purple-950/60 px-2 py-0.5 rounded border border-purple-800/50">
+              Current: {currentResidual.toFixed(2)}
+            </span>
+          </div>
+
+          <div className="h-60 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={metricHistory}>
+                <defs>
+                  <linearGradient id="residualGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.4}/>
+                    <stop offset="95%" stopColor="#8B5CF6" stopOpacity={0.0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis dataKey="time" stroke="#64748B" tick={{ fontSize: 10 }} />
+                <YAxis stroke="#64748B" tick={{ fontSize: 10 }} domain={[0, 40]} />
+                <Tooltip contentStyle={{ backgroundColor: '#0B0F19', borderColor: '#334155', fontSize: '12px' }} />
+                <ReferenceLine y={15.0} stroke="#EF4444" strokeDasharray="4 4" label={{ value: 'THRES: 15.0', fill: '#EF4444', fontSize: 10 }} />
+                <Area type="monotone" dataKey="residualNorm" stroke="#8B5CF6" strokeWidth={2.5} fillOpacity={1} fill="url(#residualGradient)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
       </div>
 
-      {/* MAIN CONTENT AREA */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* ────────────────────────────────────────────────────────────────────────── */}
+      {/* 3. MIDDLE SECTION — STRESS INJECTION & SIMULATION PANEL */}
+      {/* ────────────────────────────────────────────────────────────────────────── */}
+      <div className="bg-[#1E293B]/60 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
+        <div className="flex items-center space-x-2 border-b border-slate-800 pb-3">
+          <Play className="w-4 h-4 text-cyan-400" />
+          <h2 className="text-sm font-semibold text-slate-200">Synthetic Stress Injection & MCP Tool Invocation</h2>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <button
+            onClick={() => handleTriggerAction('simulate_salary_day_storm', 'Salary Day Storm')}
+            disabled={activeAction !== null}
+            className="flex items-center justify-center space-x-2 bg-gradient-to-r from-rose-600 to-red-700 hover:from-rose-500 hover:to-red-600 text-white font-medium py-3 px-4 rounded-lg shadow-lg hover:shadow-red-900/30 transition-all duration-200 disabled:opacity-50 text-xs"
+          >
+            <Zap className="w-4 h-4" />
+            <span>Trigger Salary Day Storm</span>
+          </button>
+
+          <button
+            onClick={() => handleTriggerAction('simulate_p2p_transfer_surge', 'P2P Surge')}
+            disabled={activeAction !== null}
+            className="flex items-center justify-center space-x-2 bg-gradient-to-r from-amber-600 to-orange-700 hover:from-amber-500 hover:to-orange-600 text-white font-medium py-3 px-4 rounded-lg shadow-lg hover:shadow-orange-900/30 transition-all duration-200 disabled:opacity-50 text-xs"
+          >
+            <RefreshCw className="w-4 h-4" />
+            <span>Simulate P2P Transfer Surge</span>
+          </button>
+
+          <button
+            onClick={() => handleTriggerAction('simulate_eod_batch_collision', 'EOD Batch')}
+            disabled={activeAction !== null}
+            className="flex items-center justify-center space-x-2 bg-gradient-to-r from-yellow-600 to-amber-700 hover:from-yellow-500 hover:to-amber-600 text-white font-medium py-3 px-4 rounded-lg shadow-lg hover:shadow-amber-900/30 transition-all duration-200 disabled:opacity-50 text-xs"
+          >
+            <Database className="w-4 h-4" />
+            <span>Simulate EOD Batch Collision</span>
+          </button>
+
+          <button
+            onClick={() => handleTriggerAction('emergency_hardcoded_shield_activation', 'Emergency Fail-Safe')}
+            disabled={activeAction !== null}
+            className="flex items-center justify-center space-x-2 bg-red-950 border border-red-600 hover:bg-red-900 text-red-200 font-bold py-3 px-4 rounded-lg shadow-lg hover:shadow-red-950/50 transition-all duration-200 disabled:opacity-50 text-xs uppercase tracking-wider"
+          >
+            <Lock className="w-4 h-4 text-red-400" />
+            <span>Emergency Fail-Safe</span>
+          </button>
+        </div>
+      </div>
+
+      {/* ────────────────────────────────────────────────────────────────────────── */}
+      {/* 4. BOTTOM GRID — ACTIVE SHIELDS & LIVE SWARM LOG */}
+      {/* ────────────────────────────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         
-        {/* TOP BAR */}
-        <header style={{ height: '60px', backgroundColor: '#ffffff', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#94a3b8' }}>
-             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-             <input type="text" placeholder="Search systems..." style={{ border: 'none', outline: 'none', backgroundColor: 'transparent', fontSize: '14px' }} />
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-            <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: '#0d9488', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 'bold' }}>OP</div>
-            <span style={{ fontSize: '14px', fontWeight: '500' }}>Admin Operator</span>
-          </div>
-        </header>
-
-        {/* PAGE CONTENT */}
-        <main style={{ flex: 1, padding: '24px', overflowY: 'auto', display: 'flex', gap: '24px' }}>
-          
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '24px' }}>
-            {activeTab === 'dashboard' && <DashboardView telemetry={telemetry} />}
-            {activeTab === 'ledger' && <LedgerView ledger={ledger} />}
-            {activeTab === 'simulations' && <SimulationsView sdk={sdk} />}
-            {activeTab === 'audit' && <AuditView sdk={sdk} telemetry={telemetry} />}
-            {activeTab === 'log' && <LogView logs={swarmLog} />}
+        {/* Bottom Left: Agentic Remediation & Active Shields */}
+        <div className="bg-[#1E293B]/60 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+            <div className="flex items-center space-x-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              <h2 className="text-sm font-semibold text-slate-200">Autonomic Resilience Middleware Shields</h2>
+            </div>
+            <span className="text-xs text-slate-400">Saga Rollback Enabled</span>
           </div>
 
-          {/* RIGHT PANEL: LIVE SWARM LOG (Always visible on dashboard/simulations) */}
-          {(activeTab === 'dashboard' || activeTab === 'simulations') && (
-            <div style={{ width: '320px', backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-              <div style={{ padding: '16px', borderBottom: '1px solid #e2e8f0', fontWeight: '600', fontSize: '14px' }}>Live Activity Feed</div>
-              <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                {swarmLog.slice().reverse().map((log, i) => (
-                  <LogEntry key={i} log={log} />
-                ))}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* SingleFlightGate */}
+            <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-200">SingleFlightGate</span>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${shields.singleFlight.active ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
+                  {shields.singleFlight.active ? 'ACTIVE' : 'STANDBY'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400">Coalesces concurrent ledger balance queries over an in-flight Promise map.</p>
+              <div className="text-xs font-mono text-cyan-400 pt-1">Deduplicated: {shields.singleFlight.count} reqs</div>
+            </div>
+
+            {/* IdempotencyEnforcer */}
+            <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-200">IdempotencyEnforcer</span>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${shields.idempotency.active ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
+                  {shields.idempotency.active ? 'ACTIVE' : 'STANDBY'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400">SHA-256 mutation hashing with LRU cache eviction (max 10k entries).</p>
+              <div className="text-xs font-mono text-purple-400 pt-1">Duplicates Intercepted: {shields.idempotency.blocked}</div>
+            </div>
+
+            {/* QosShunting */}
+            <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-200">QosShunting</span>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${shields.qosShunting.active ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
+                  {shields.qosShunting.active ? 'ACTIVE' : 'STANDBY'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400">Token-bucket admission control reserving 90% bandwidth for transfers.</p>
+              <div className="text-xs font-mono text-amber-400 pt-1">Batch Throttling Ratio: {shields.qosShunting.shedRatio}</div>
+            </div>
+
+            {/* CircuitBreaker */}
+            <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-200">CircuitBreaker</span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-800 text-slate-500 border border-slate-700">
+                  CLOSED
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400">Isolated route fallback for downstream legacy gateway timeouts.</p>
+              <div className="text-xs font-mono text-emerald-400 pt-1">Gateway Health: 100%</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Bottom Right: Live Swarm Log & Forensic Justification */}
+        <div className="bg-[#1E293B]/60 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4 flex flex-col justify-between">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center space-x-2">
+                <Terminal className="w-4 h-4 text-purple-400" />
+                <h2 className="text-sm font-semibold text-slate-200">Swarm Activity & Forensic Reasoning Feed</h2>
+              </div>
+              <button
+                onClick={handleGenerateRca}
+                className="flex items-center space-x-1.5 text-xs bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/40 px-3 py-1.5 rounded-lg transition-colors"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>SOC2 RCA Report</span>
+              </button>
+            </div>
+
+            {/* Dynamic Forensic Justification Banner */}
+            {currentTelemetry?.forensic_justification && (
+              <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-3 text-xs text-slate-300 space-y-1">
+                <div className="font-bold text-purple-400 flex items-center space-x-1">
+                  <Cpu className="w-3.5 h-3.5" />
+                  <span>PRIME Forensic Justification:</span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  {currentTelemetry.forensic_justification}
+                </p>
+              </div>
+            )}
+
+            {/* Terminal Output Window */}
+            <div className="bg-[#0B0F19] border border-slate-800 rounded-lg p-3 h-44 overflow-y-auto font-mono text-[11px] space-y-1.5 scrollbar-thin scrollbar-thumb-slate-800">
+              {swarmLogs.length === 0 ? (
+                <div className="text-slate-600 italic">Listening to NitroStack swarm event stream...</div>
+              ) : (
+                swarmLogs.slice(-20).map((log, idx) => (
+                  <div key={idx} className="flex space-x-2">
+                    <span className="text-slate-500">{log.time}</span>
+                    <span className={`font-bold ${log.source === 'PRIME' ? 'text-purple-400' : log.source === 'ATLAS' ? 'text-cyan-400' : log.source === 'CERBERUS' ? 'text-amber-400' : 'text-emerald-400'}`}>
+                      [{log.source}]
+                    </span>
+                    <span className={log.type === 'error' ? 'text-red-400' : log.type === 'warn' ? 'text-amber-300' : 'text-slate-300'}>
+                      {log.message}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ────────────────────────────────────────────────────────────────────────── */}
+      {/* 5. SOC2 COMPLIANCE RCA MODAL */}
+      {/* ────────────────────────────────────────────────────────────────────────── */}
+      {showRcaModal && rcaReport && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#1E293B] border border-slate-700 rounded-xl max-w-2xl w-full p-6 space-y-6 shadow-2xl animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between border-b border-slate-700 pb-4">
+              <div className="flex items-center space-x-3">
+                <FileText className="w-6 h-6 text-purple-400" />
+                <div>
+                  <h3 className="text-lg font-bold text-white">Immutable SOC2 Compliance RCA Report</h3>
+                  <p className="text-xs text-slate-400">Ref: {rcaReport.documentRef}</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowRcaModal(false)}
+                className="text-slate-400 hover:text-white text-lg font-bold px-2"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs font-mono bg-[#0B0F19] p-4 rounded-lg border border-slate-800">
+              <div className="flex justify-between border-b border-slate-800 pb-2">
+                <span className="text-slate-400">Incident ID:</span>
+                <span className="text-purple-400 font-bold">{rcaReport.incidentId}</span>
+              </div>
+              <div className="flex justify-between border-b border-slate-800 pb-2">
+                <span className="text-slate-400">Timestamp:</span>
+                <span className="text-slate-200">{rcaReport.filedAt}</span>
+              </div>
+              <div className="flex justify-between border-b border-slate-800 pb-2">
+                <span className="text-slate-400">SVD Residual Norm:</span>
+                <span className="text-rose-400 font-bold">{rcaReport.svdResidualNorm}</span>
+              </div>
+              <div className="flex justify-between border-b border-slate-800 pb-2">
+                <span className="text-slate-400">Active Shields:</span>
+                <span className="text-emerald-400 font-bold">{rcaReport.activeShields?.join(', ')}</span>
+              </div>
+              <div className="flex justify-between border-b border-slate-800 pb-2">
+                <span className="text-slate-400">Remediation Latency:</span>
+                <span className="text-cyan-400 font-bold">{rcaReport.remediationLatencyMs} ms</span>
+              </div>
+              <div className="pt-2">
+                <span className="text-slate-400 block mb-1">Resolution Summary:</span>
+                <p className="text-slate-300 font-sans leading-relaxed bg-slate-900 p-2.5 rounded border border-slate-800">
+                  {rcaReport.auditTrail?.resolution}
+                </p>
               </div>
             </div>
-          )}
 
-        </main>
-      </div>
-    </div>
-  );
-}
-
-// ==========================================
-// COMPONENTS
-// ==========================================
-
-function NavItem({ active, onClick, icon, label }: any) {
-  return (
-    <div 
-      onClick={onClick}
-      style={{
-        display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 16px', cursor: 'pointer',
-        borderRadius: '6px', fontSize: '14px', fontWeight: '500',
-        backgroundColor: active ? '#ccfbf1' : 'transparent',
-        color: active ? '#0d9488' : '#64748b'
-      }}
-    >
-      {icon}
-      <span>{label}</span>
-    </div>
-  );
-}
-
-function Card({ title, children }: any) {
-  return (
-    <div style={{ backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '20px' }}>
-      {title && <h3 style={{ margin: '0 0 16px 0', fontSize: '16px', color: '#0f172a' }}>{title}</h3>}
-      {children}
-    </div>
-  );
-}
-
-function Metric({ label, value, status = 'neutral' }: any) {
-  const color = status === 'ok' ? '#16a34a' : status === 'warn' ? '#d97706' : status === 'error' ? '#dc2626' : '#0f172a';
-  return (
-    <div style={{ flex: 1, backgroundColor: '#f8fafc', padding: '16px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-      <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</div>
-      <div style={{ fontSize: '24px', fontWeight: 'bold', color }}>{value}</div>
-    </div>
-  );
-}
-
-function LogEntry({ log }: any) {
-  const isWarn = log.type === 'warn';
-  const isError = log.type === 'error';
-  const color = isError ? '#ef4444' : isWarn ? '#f59e0b' : '#3b82f6';
-  const initial = log.source.substring(0, 2).toUpperCase();
-
-  return (
-    <div style={{ display: 'flex', gap: '12px', fontSize: '13px' }}>
-      <div style={{ minWidth: '28px', height: '28px', borderRadius: '50%', backgroundColor: color, color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: 'bold' }}>
-        {initial}
-      </div>
-      <div>
-        <div style={{ color: '#94a3b8', fontSize: '11px', marginBottom: '2px' }}>{log.time}</div>
-        <div style={{ color: '#334155', lineHeight: '1.4' }}>{log.message}</div>
-      </div>
-    </div>
-  );
-}
-
-// ==========================================
-// VIEWS
-// ==========================================
-
-function DashboardView({ telemetry }: any) {
-  const isAnomaly = telemetry?.drift?.isAnomaly;
-  const residual = telemetry?.drift?.residualNorm || 0;
-  
-  const statusColor = isAnomaly ? 'error' : (residual > 5 ? 'warn' : 'ok');
-  
-  return (
-    <>
-      <h2 style={{ margin: '0 0 8px 0', fontSize: '24px', color: '#0f172a' }}>System Overview</h2>
-      
-      <div style={{ display: 'flex', gap: '16px' }}>
-        <Metric label="Active DB Connections" value={Math.floor(telemetry?.telemetry?.[1] || 15) + '%'} />
-        <Metric label="DB Lock Latency" value={(telemetry?.telemetry?.[0] || 2).toFixed(1) + 'ms'} status={statusColor} />
-        <Metric label="Ledger Variance" value="₹0.00" status="ok" />
-        <Metric label="SVD Residual" value={residual.toFixed(3)} status={statusColor} />
-      </div>
-
-      <Card title="Account Pool Kinetic Topology (SVD Subspace)">
-        <div style={{ height: '300px', backgroundColor: '#f8fafc', borderRadius: '6px', border: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' }}>
-          {/* Custom SVG Radial Node Graph mapping to mock clusters */}
-          <svg width="100%" height="100%" viewBox="0 0 400 300">
-            {/* Center Node */}
-            <circle cx="200" cy="150" r="40" fill={isAnomaly ? '#fee2e2' : '#dcfce7'} stroke={isAnomaly ? '#ef4444' : '#22c55e'} strokeWidth="2" />
-            <text x="200" y="155" textAnchor="middle" fontSize="12" fontWeight="bold" fill="#334155">CORE CBS</text>
-            
-            {/* Satellite Nodes */}
-            {[0, 1, 2, 3, 4, 5].map(i => {
-              const angle = (i * 60) * Math.PI / 180;
-              const cx = 200 + Math.cos(angle) * 100;
-              const cy = 150 + Math.sin(angle) * 100;
-              const loadIntensity = isAnomaly ? Math.random() * 5 : 1;
-              const strokeColor = loadIntensity > 3 ? '#f59e0b' : '#cbd5e1';
-              
-              return (
-                <g key={i}>
-                  <line x1="200" y1="150" x2={cx} y2={cy} stroke={strokeColor} strokeWidth={loadIntensity} opacity="0.5" />
-                  <circle cx={cx} cy={cy} r="20" fill="#ffffff" stroke={strokeColor} strokeWidth="2" />
-                  <text x={cx} y={cy+4} textAnchor="middle" fontSize="10" fill="#64748b">P{i+1}</text>
-                </g>
-              );
-            })}
-          </svg>
-        </div>
-      </Card>
-    </>
-  );
-}
-
-function LedgerView({ ledger }: any) {
-  return (
-    <Card title="Core Banking Ledger (ACC-100 to ACC-250)">
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', textAlign: 'left' }}>
-        <thead>
-          <tr style={{ borderBottom: '2px solid #e2e8f0', color: '#64748b' }}>
-            <th style={{ padding: '12px 8px' }}>Account ID</th>
-            <th style={{ padding: '12px 8px' }}>Holder Name</th>
-            <th style={{ padding: '12px 8px' }}>Balance</th>
-            <th style={{ padding: '12px 8px' }}>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {ledger.slice(0, 20).map((acc: any) => (
-            <tr key={acc.accountId} style={{ borderBottom: '1px solid #f1f5f9' }}>
-              <td style={{ padding: '12px 8px', fontWeight: '500', color: '#0d9488' }}>{acc.accountId}</td>
-              <td style={{ padding: '12px 8px' }}>{acc.holderName}</td>
-              <td style={{ padding: '12px 8px' }}>
-                {acc.balance.toLocaleString('en-IN', { style: 'currency', currency: 'INR' })}
-              </td>
-              <td style={{ padding: '12px 8px' }}>
-                <span style={{ backgroundColor: '#dcfce7', color: '#166534', padding: '2px 8px', borderRadius: '12px', fontSize: '11px', fontWeight: '600' }}>ACTIVE</span>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div style={{ padding: '12px', textAlign: 'center', color: '#94a3b8', fontSize: '12px' }}>Showing top 20 rows...</div>
-    </Card>
-  );
-}
-
-function SimulationsView({ sdk }: any) {
-  const [running, setRunning] = useState<string | null>(null);
-  const [liveMode, setLiveMode] = useState<boolean>(false);
-
-  const toggleMode = async () => {
-    const newMode = !liveMode;
-    setLiveMode(newMode);
-    await sdk.callTool('set_simulation_mode', { mode: newMode ? 'live' : 'mock' });
-  };
-
-  const runSim = async (tool: string) => {
-    setRunning(tool);
-    await sdk.callTool(tool, {});
-    setTimeout(() => setRunning(null), 2000);
-  };
-
-  const btnStyle = { padding: '12px 24px', backgroundColor: '#0d9488', color: 'white', border: '1px solid #0f766e', borderRadius: '6px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' };
-
-  return (
-    <Card title="Synthetic Load Generators">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', padding: '12px', backgroundColor: '#f1f5f9', borderRadius: '6px' }}>
-        <div style={{ fontSize: '14px', fontWeight: '500' }}>
-          Data Source: {liveMode ? <span style={{ color: '#ef4444' }}>Live Postgres Validation Harness</span> : <span style={{ color: '#0d9488' }}>Mock In-Memory DB</span>}
-        </div>
-        <button onClick={toggleMode} style={{ padding: '8px 16px', backgroundColor: liveMode ? '#ef4444' : '#0d9488', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', fontWeight: 'bold' }}>
-          Switch to {liveMode ? 'Mock Mode' : 'Live Validation'}
-        </button>
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px' }}>
-          <div>
-            <div style={{ fontWeight: '600', color: '#0f172a' }}>Salary Day Storm</div>
-            <div style={{ fontSize: '13px', color: '#64748b', marginTop: '4px' }}>Simulates heavy concurrent read contention on a single account.</div>
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => setShowRcaModal(false)}
+                className="bg-purple-600 hover:bg-purple-500 text-white font-medium px-4 py-2 rounded-lg text-xs transition-colors"
+              >
+                Close Audit Record
+              </button>
+            </div>
           </div>
-          <button style={btnStyle} onClick={() => runSim('simulate_salary_day_storm')}>{running === 'simulate_salary_day_storm' ? 'Starting...' : 'Execute'}</button>
         </div>
-        
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px' }}>
-          <div>
-            <div style={{ fontWeight: '600', color: '#0f172a' }}>P2P Transfer Surge</div>
-            <div style={{ fontSize: '13px', color: '#64748b', marginTop: '4px' }}>Simulates hundreds of unique write collisions.</div>
-          </div>
-          <button style={btnStyle} onClick={() => runSim('simulate_p2p_transfer_surge')}>{running === 'simulate_p2p_transfer_surge' ? 'Starting...' : 'Execute'}</button>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px' }}>
-          <div>
-            <div style={{ fontWeight: '600', color: '#0f172a' }}>EOD Batch Collision</div>
-            <div style={{ fontSize: '13px', color: '#64748b', marginTop: '4px' }}>Simulates long-running background batch jobs blocking teller operations.</div>
-          </div>
-          <button style={btnStyle} onClick={() => runSim('simulate_eod_batch_collision')}>{running === 'simulate_eod_batch_collision' ? 'Starting...' : 'Execute'}</button>
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-function LogView({ logs }: any) {
-  return (
-    <Card title="Full Swarm Activity Log">
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-        {logs.slice().reverse().map((log: any, i: number) => (
-          <div key={i} style={{ padding: '12px', borderBottom: '1px solid #f1f5f9', display: 'flex', gap: '16px', fontSize: '13px' }}>
-            <div style={{ width: '80px', color: '#94a3b8' }}>{log.time}</div>
-            <div style={{ width: '80px', fontWeight: 'bold', color: log.type === 'error' ? '#ef4444' : log.type === 'warn' ? '#f59e0b' : '#0d9488' }}>{log.source}</div>
-            <div style={{ flex: 1, color: '#334155' }}>{log.message}</div>
-          </div>
-        ))}
-      </div>
-    </Card>
-  );
-}
-
-function AuditView({ sdk, telemetry }: any) {
-  const [authorized, setAuthorized] = useState(false);
-  const isAnomaly = telemetry?.drift?.isAnomaly;
-  
-  return (
-    <Card title="Audit & Authorization">
-      <div style={{ padding: '16px', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '24px' }}>
-        <h4 style={{ margin: '0 0 12px 0', color: '#0f172a' }}>Shadow-Parity Check</h4>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px', color: '#334155' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>SVD Residual Anomaly Detected:</span> <strong style={{ color: isAnomaly ? '#ef4444' : '#16a34a' }}>{isAnomaly ? 'YES' : 'NO'}</strong></div>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Latency Delta (Shielded vs Raw):</span> <strong style={{ color: '#16a34a' }}>-245ms</strong></div>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Ledger Variance Proof:</span> <strong style={{ color: '#16a34a' }}>$0.00</strong></div>
-        </div>
-      </div>
-
-      <button 
-        onClick={() => setAuthorized(true)}
-        style={{ width: '100%', padding: '16px', backgroundColor: authorized ? '#16a34a' : '#0f172a', color: 'white', border: 'none', borderRadius: '6px', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer', transition: 'background 0.2s' }}>
-        {authorized ? '✓ ORBIT STABILIZED' : 'AUTHORIZE & STABILIZE ORBIT'}
-      </button>
-    </Card>
+      )}
+    </div>
   );
 }
