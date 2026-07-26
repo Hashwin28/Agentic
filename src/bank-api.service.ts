@@ -149,31 +149,31 @@ export class BankApiService {
   private simulateStorm() {
     console.log('[AEGIS-SIM] Salary Day Storm Initiated...');
     
-    // Simulate 500 concurrent transfers with highly duplicated nonces (retry storms)
+    // In-memory simulation of 500 transfers with duplicated nonces
     for (let i = 0; i < 500; i++) {
-      const nonce = `storm-nonce-${Math.floor(i / 10)}`; // Duplicate every 10 requests
-      fetch('http://localhost:3001/api/v1/transfer', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          from: 'MOCK-CORP-ACCOUNT',
-          to: `EMP-${i}`,
-          amount: 5000,
-          nonce
-        })
-      }).catch(() => null);
+      const nonce = `storm-nonce-${Math.floor(i / 10)}`;
+      if (this.idempotency.checkAndRecord(nonce, 'MOCK-CORP-ACCOUNT', `EMP-${i}`, 5000)) {
+        this.cbs.executeTransfer('MOCK-CORP-ACCOUNT', `EMP-${i}`, 5000).catch(() => null);
+      }
     }
 
-    // Simulate 1000 concurrent balance checks for the same account
+    // In-memory simulation of 1000 balance queries over single-flight gate
     for (let i = 0; i < 1000; i++) {
-      fetch('http://localhost:3001/api/v1/balance/MOCK-CORP-ACCOUNT').catch(() => null);
+      this.singleFlight.execute('/api/v1/balance/MOCK-CORP-ACCOUNT', () => this.cbs.getBalance('MOCK-CORP-ACCOUNT')).catch(() => null);
     }
   }
 
   private startServer() {
-    const PORT = 3001;
-    this.server = this.app.listen(PORT, () => {
-      console.log(`[AEGIS] Replicate Bank System API listening on port ${PORT}`);
-    });
+    try {
+      const PORT = process.env.BANK_API_PORT ? parseInt(process.env.BANK_API_PORT, 10) : 3001;
+      this.server = this.app.listen(PORT, () => {
+        console.log(`[AEGIS] Replicate Bank System API listening on port ${PORT}`);
+      });
+      this.server.on('error', (err: any) => {
+        console.warn(`[AEGIS] Bank API secondary port note: ${err.message}`);
+      });
+    } catch (err: any) {
+      console.warn(`[AEGIS] Could not bind secondary port: ${err.message}`);
+    }
   }
 }
