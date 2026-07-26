@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "node dist/index.js",
-    "build": "tsc",
+    "build": "npm run build --prefix src/widgets && tsc",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit"
   },
