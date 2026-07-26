@@ -3,3 +3,4 @@ dist
 .next
 *.log
 src/widgets/out/trace
+.nitrostudio/
