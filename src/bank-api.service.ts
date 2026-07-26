@@ -152,14 +152,20 @@ export class BankApiService {
     // In-memory simulation of 500 transfers with duplicated nonces
     for (let i = 0; i < 500; i++) {
       const nonce = `storm-nonce-${Math.floor(i / 10)}`;
-      if (this.idempotency.checkAndRecord(nonce, 'MOCK-CORP-ACCOUNT', `EMP-${i}`, 5000)) {
-        this.cbs.executeTransfer('MOCK-CORP-ACCOUNT', `EMP-${i}`, 5000).catch(() => null);
+      if (this.idempotency.checkAndRegister('MOCK-CORP-ACCOUNT', `EMP-${i}`, 5000, nonce)) {
+        this.cbs.processTransaction({
+          fromAccountId: 'MOCK-CORP-ACCOUNT',
+          toAccountId: `EMP-${i}`,
+          amount: 5000,
+          currency: 'USD',
+          timestamp: new Date().toISOString()
+        }).catch(() => null);
       }
     }
 
     // In-memory simulation of 1000 balance queries over single-flight gate
     for (let i = 0; i < 1000; i++) {
-      this.singleFlight.execute('/api/v1/balance/MOCK-CORP-ACCOUNT', () => this.cbs.getBalance('MOCK-CORP-ACCOUNT')).catch(() => null);
+      this.singleFlight.coalesce('/api/v1/balance/MOCK-CORP-ACCOUNT', () => this.cbs.getBalance('MOCK-CORP-ACCOUNT')).catch(() => null);
     }
   }
 
