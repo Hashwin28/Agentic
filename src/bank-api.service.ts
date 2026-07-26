@@ -1,11 +1,32 @@
 import { Injectable } from '@nitrostack/core';
 import express, { Express } from 'express';
 import * as path from 'path';
+import * as fs from 'fs';
 import cors from 'cors';
 import { MockCBSService } from './mock-cbs.service.js';
 import { SingleFlightGate } from './patterns/single-flight.js';
 import { IdempotencyEnforcer } from './patterns/idempotency.js';
 import { QosShunting, TrafficClass } from './patterns/qos-shunting.js';
+
+/** Helper to resolve static widget HTML files across diverse environment CWD layouts. */
+function findWidgetHtmlFile(widgetName: string): string | null {
+  const cleanName = widgetName.replace(/\.html$/, '');
+  const candidatePaths = [
+    path.join(process.cwd(), 'src/widgets/out', `${cleanName}.html`),
+    path.join(process.cwd(), 'widgets/out', `${cleanName}.html`),
+    path.join(process.cwd(), 'dist/widgets/out', `${cleanName}.html`),
+    path.join(process.cwd(), 'out', `${cleanName}.html`),
+    path.join(process.cwd(), 'src/widgets/out', 'aegis-kinetic-canvas.html'),
+    path.join(process.cwd(), 'widgets/out', 'aegis-kinetic-canvas.html'),
+  ];
+
+  for (const p of candidatePaths) {
+    if (fs.existsSync(p)) {
+      return p;
+    }
+  }
+  return null;
+}
 
 @Injectable({ deps: [MockCBSService, SingleFlightGate, IdempotencyEnforcer, QosShunting] })
 export class BankApiService {
@@ -22,25 +43,32 @@ export class BankApiService {
     this.app.use(cors());
     this.app.use(express.json());
 
-    // Serve the full Bank SRE Command Center UI directly on root route /
-    this.app.get('/', (req, res) => {
-      const widgetPath = path.join(process.cwd(), 'src/widgets/out', 'aegis-kinetic-canvas.html');
-      res.sendFile(widgetPath);
-    });
+    // Robust static widget route handler
+    const handleWidgetRequest = (req: express.Request, res: express.Response) => {
+      const rawParam = req.params.widgetName;
+      const name = (Array.isArray(rawParam) ? rawParam[0] : rawParam) || 'aegis-kinetic-canvas';
+      const file = findWidgetHtmlFile(name);
+      if (file) {
+        return res.sendFile(file);
+      }
+      // Ultimate fallback to primary widget HTML
+      const fallbackFile = findWidgetHtmlFile('aegis-kinetic-canvas');
+      if (fallbackFile) {
+        return res.sendFile(fallbackFile);
+      }
+      return res.status(404).send('Bank SRE Control Panel widget build not found');
+    };
 
-    // Explicitly serve widgets from Next.js export for NitroStudio's proxy
-    this.app.get('/widgets/:widgetName', (req, res) => {
-      const widgetName = req.params.widgetName;
-      const widgetPath = path.join(process.cwd(), 'src/widgets/out', `${widgetName}.html`);
-      res.sendFile(widgetPath);
-    });
-    this.app.get('/:widgetName', (req, res) => {
-      const widgetName = req.params.widgetName;
-      const widgetPath = path.join(process.cwd(), 'src/widgets/out', `${widgetName}.html`);
-      res.sendFile(widgetPath);
-    });
+    // Explicit UI routes
+    this.app.get('/', handleWidgetRequest);
+    this.app.get('/aegis-kinetic-canvas', handleWidgetRequest);
+    this.app.get('/sre-control-panel', handleWidgetRequest);
+    this.app.get('/aegis-resilience-widget', handleWidgetRequest);
+    this.app.get('/widgets/:widgetName', handleWidgetRequest);
+    this.app.get('/:widgetName', handleWidgetRequest);
 
     this.app.use(express.static(path.join(process.cwd(), 'src/widgets/out')));
+    this.app.use(express.static(path.join(process.cwd(), 'widgets/out')));
 
     this.setupRoutes();
     this.startServer();
