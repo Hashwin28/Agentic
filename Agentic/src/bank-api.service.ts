@@ -1,5 +1,5 @@
 import { Injectable } from '@nitrostack/core';
-import express, { Express } from 'express';
+import express, { Express, Request, Response, NextFunction } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
 import cors from 'cors';
@@ -43,18 +43,19 @@ export class BankApiService {
     this.app.use(cors());
     this.app.use(express.json());
 
+    // PRODUCTION ROUTING FIX (3): Serve static frontend assets dynamically from build/public directories
+    this.app.use(express.static(path.join(process.cwd(), 'src/widgets/out')));
+    this.app.use(express.static(path.join(process.cwd(), 'widgets/out')));
+    this.app.use(express.static(path.join(process.cwd(), 'dist/widgets/out')));
+    this.app.use(express.static(path.join(process.cwd(), 'out')));
+
     // Robust static widget route handler
-    const handleWidgetRequest = (req: express.Request, res: express.Response) => {
+    const handleWidgetRequest = (req: Request, res: Response) => {
       const rawParam = req.params.widgetName;
       const name = (Array.isArray(rawParam) ? rawParam[0] : rawParam) || 'aegis-kinetic-canvas';
-      const file = findWidgetHtmlFile(name);
+      const file = findWidgetHtmlFile(name) || findWidgetHtmlFile('aegis-kinetic-canvas');
       if (file) {
         return res.sendFile(file);
-      }
-      // Ultimate fallback to primary widget HTML
-      const fallbackFile = findWidgetHtmlFile('aegis-kinetic-canvas');
-      if (fallbackFile) {
-        return res.sendFile(fallbackFile);
       }
       return res.status(404).send('Bank SRE Control Panel widget build not found');
     };
@@ -65,12 +66,27 @@ export class BankApiService {
     this.app.get('/sre-control-panel', handleWidgetRequest);
     this.app.get('/aegis-resilience-widget', handleWidgetRequest);
     this.app.get('/widgets/:widgetName', handleWidgetRequest);
-    this.app.get('/:widgetName', handleWidgetRequest);
-
-    this.app.use(express.static(path.join(process.cwd(), 'src/widgets/out')));
-    this.app.use(express.static(path.join(process.cwd(), 'widgets/out')));
 
     this.setupRoutes();
+
+    // PRODUCTION ROUTING FIX (3): Wildcard fallback route serving UI while bypassing internal API and MCP routes
+    this.app.get('*', (req: Request, res: Response, next: NextFunction) => {
+      if (
+        req.path.startsWith('/api') ||
+        req.path.startsWith('/mcp') ||
+        req.path.startsWith('/sse') ||
+        req.path.startsWith('/health')
+      ) {
+        return next();
+      }
+      const widgetName = req.path.substring(1) || 'aegis-kinetic-canvas';
+      const file = findWidgetHtmlFile(widgetName) || findWidgetHtmlFile('aegis-kinetic-canvas');
+      if (file) {
+        return res.sendFile(file);
+      }
+      return next();
+    });
+
     this.startServer();
   }
 
@@ -171,8 +187,7 @@ export class BankApiService {
 
   private startServer() {
     try {
-      // PRODUCTION DEPLOYMENT PATCH: Host Binding & Dynamic Port Assignment
-      // Listens on process.env.PORT dynamically with 3000 fallback, explicitly bound to '0.0.0.0' for container health checks
+      // PRODUCTION ROUTING FIX (1, 2 & 4): Dynamic Environment Port Binding, 0.0.0.0 Host Binding & Clean Error Boundary
       const PORT = Number(process.env.PORT) || 3000;
       const HOST = '0.0.0.0';
 
