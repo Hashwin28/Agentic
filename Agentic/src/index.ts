@@ -65,8 +65,11 @@ async function bootstrap() {
         expressApp.get('/aegis-resilience-widget', handleWidgetRequest);
         expressApp.get('/widgets/:widgetName', handleWidgetRequest);
 
-        // PRODUCTION ROUTING FIX (3): Wildcard fallback route serving UI while bypassing internal MCP and API routes
-        expressApp.get('*', (req: Request, res: Response, next: NextFunction) => {
+        // PRODUCTION ROUTING FIX (3): Middleware fallback route serving UI while bypassing internal MCP and API routes
+        expressApp.use((req: Request, res: Response, next: NextFunction) => {
+          if (req.method !== 'GET') {
+            return next();
+          }
           if (
             req.path.startsWith('/mcp') ||
             req.path.startsWith('/sse') ||

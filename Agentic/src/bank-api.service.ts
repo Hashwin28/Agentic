@@ -69,8 +69,11 @@ export class BankApiService {
 
     this.setupRoutes();
 
-    // PRODUCTION ROUTING FIX (3): Wildcard fallback route serving UI while bypassing internal API and MCP routes
-    this.app.get('*', (req: Request, res: Response, next: NextFunction) => {
+    // PRODUCTION ROUTING FIX (3): Middleware fallback route serving UI while bypassing internal API and MCP routes
+    this.app.use((req: Request, res: Response, next: NextFunction) => {
+      if (req.method !== 'GET') {
+        return next();
+      }
       if (
         req.path.startsWith('/api') ||
         req.path.startsWith('/mcp') ||
