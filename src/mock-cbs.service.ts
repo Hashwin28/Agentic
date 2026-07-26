@@ -10,6 +10,7 @@
 
 import { Injectable } from '@nitrostack/core';
 import { createHash, randomUUID } from 'crypto';
+import pg from 'pg';
 import type {
   BankAccount,
   TelemetryVector,
@@ -43,6 +44,9 @@ export class MockCBSService {
   /** In-memory account ledger. */
   private readonly accounts = new Map<string, BankAccount>();
 
+  /** PRODUCTION DEPLOYMENT PATCH (2. Graceful Database Startup): PostgreSQL Pool instance */
+  private dbPool: pg.Pool | null = null;
+
   /** Rolling telemetry history matrix (each row is a TelemetryVector). */
   private readonly telemetryHistory: TelemetryVector[] = [];
 
@@ -72,7 +76,42 @@ export class MockCBSService {
 
   constructor() {
     this.seedAccounts();
+    // PRODUCTION DEPLOYMENT PATCH (2. Graceful Database Startup):
+    // Lazy PostgreSQL initialization wrapped in a try-catch block so database connection delays
+    // or ECONNREFUSED do not throw unhandled promise rejections or crash the main Node process during health checks.
+    this.initDatabaseGracefully().catch((err) => {
+      console.warn(`[AEGIS] Graceful DB init non-fatal catch: ${err.message}`);
+    });
     this.startTelemetryCollection();
+  }
+
+  /**
+   * PRODUCTION DEPLOYMENT PATCH (2. Graceful Database Startup):
+   * Safely initializes the PostgreSQL database connection pool inside a try-catch block.
+   */
+  private async initDatabaseGracefully(): Promise<void> {
+    try {
+      const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+      if (!connectionString) {
+        console.log('[AEGIS] No DATABASE_URL provided. Operating in-memory ledger fallback.');
+        return;
+      }
+      this.dbPool = new pg.Pool({
+        connectionString,
+        connectionTimeoutMillis: 5000,
+      });
+      const client = await this.dbPool.connect();
+      try {
+        await client.query('SELECT 1');
+        console.log('[AEGIS] PostgreSQL connection established successfully.');
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.warn(
+        `[AEGIS] PRODUCTION PATCH - Graceful DB Startup: PostgreSQL connection delay / ECONNREFUSED (${err.message}). Node process continuing container health check successfully.`
+      );
+    }
   }
 
   // ──────────────────────────────────────────────────────────────────────────

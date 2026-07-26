@@ -171,15 +171,18 @@ export class BankApiService {
 
   private startServer() {
     try {
-      const PORT = process.env.BANK_API_PORT ? parseInt(process.env.BANK_API_PORT, 10) : 3001;
-      this.server = this.app.listen(PORT, () => {
-        console.log(`[AEGIS] Replicate Bank System API listening on port ${PORT}`);
+      // PRODUCTION DEPLOYMENT PATCH (1. Host Binding & Port Configuration):
+      // Listen on process.env.PORT dynamically with fallback to 3000, and explicitly bind to '0.0.0.0'
+      // instead of 'localhost' or '127.0.0.1' so container ingress and cloud health checks can reach the API.
+      const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : (process.env.BANK_API_PORT ? parseInt(process.env.BANK_API_PORT, 10) : 3000);
+      this.server = this.app.listen(PORT, '0.0.0.0', () => {
+        console.log(`[AEGIS] Replicate Bank System API listening on port ${PORT} bound to 0.0.0.0`);
       });
       this.server.on('error', (err: any) => {
-        console.warn(`[AEGIS] Bank API secondary port note: ${err.message}`);
+        console.warn(`[AEGIS] Bank API server note: ${err.message}`);
       });
     } catch (err: any) {
-      console.warn(`[AEGIS] Could not bind secondary port: ${err.message}`);
+      console.warn(`[AEGIS] Could not bind server port: ${err.message}`);
     }
   }
 }

@@ -20,25 +20,30 @@ const pool = new pg.Pool({
 
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
 
+// PRODUCTION DEPLOYMENT PATCH (2. Graceful Database Startup):
+// Wrap PostgreSQL connection/initialization in a try-catch block to prevent container startup crash
 async function seed() {
-  const client = await pool.connect();
+  let client;
   try {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS accounts (
-        id VARCHAR(50) PRIMARY KEY,
-        balance DECIMAL(15, 2) NOT NULL
-      )
-    `);
-    
-    // Seed initial account
-    const check = await client.query('SELECT 1 FROM accounts WHERE id = $1', ['ACC-12345']);
-    if (check.rowCount === 0) {
-      await client.query('INSERT INTO accounts (id, balance) VALUES ($1, $2)', ['ACC-12345', 54200.50]);
+    client = await pool.connect();
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS accounts (
+          id VARCHAR(50) PRIMARY KEY,
+          balance DECIMAL(15, 2) NOT NULL
+        )
+      `);
+      
+      // Seed initial account
+      const check = await client.query('SELECT 1 FROM accounts WHERE id = $1', ['ACC-12345']);
+      if (check.rowCount === 0) {
+        await client.query('INSERT INTO accounts (id, balance) VALUES ($1, $2)', ['ACC-12345', 54200.50]);
+      }
+    } finally {
+      if (client) client.release();
     }
   } catch (e) {
-    console.error('Seed error:', e);
-  } finally {
-    client.release();
+    console.warn(`[AEGIS] PRODUCTION PATCH - Graceful DB startup note: ${e.message}. Process remaining healthy for container ingress.`);
   }
 }
 
@@ -79,9 +84,11 @@ app.get('/metrics', (req, res) => {
   });
 });
 
-const PORT = 3000;
-app.listen(PORT, async () => {
-  console.log(`Legacy Core Server listening on port ${PORT}`);
+// PRODUCTION DEPLOYMENT PATCH (1. Host Binding & Port Configuration):
+// Listen on process.env.PORT with 3000 fallback, explicitly bound to '0.0.0.0'
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+app.listen(PORT, '0.0.0.0', async () => {
+  console.log(`Legacy Core Server listening on port ${PORT} bound to 0.0.0.0`);
   // Wait a sec for DB to be up if starting concurrently
   setTimeout(seed, 2000);
 });
