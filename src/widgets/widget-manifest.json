@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "widgets": [
+    {
+      "uri": "/aegis-resilience-widget",
+      "name": "Aegis Resilience Widget",
+      "description": "Dashboard for Project Aegis",
+      "examples": [],
+      "tags": ["aegis", "sre", "dashboard"]
+    }
+  ],
+  "generatedAt": "2026-07-25T00:00:00.000Z"
+}
