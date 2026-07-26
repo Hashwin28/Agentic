@@ -1,0 +1,27 @@
+{
+  "version": "1.0.0",
+  "widgets": [
+    {
+      "uri": "/aegis-kinetic-canvas",
+      "name": "Aegis Kinetic Canvas",
+      "description": "Core Banking SRE Command Center Dashboard",
+      "examples": [],
+      "tags": ["aegis", "sre", "dashboard", "control-panel"]
+    },
+    {
+      "uri": "/aegis-resilience-widget",
+      "name": "Aegis Resilience Widget",
+      "description": "Resilience Middleware Controls & Analytics",
+      "examples": [],
+      "tags": ["aegis", "resilience", "dashboard"]
+    },
+    {
+      "uri": "/sre-control-panel",
+      "name": "SRE Control Panel",
+      "description": "Bank Internal Engineering Control Panel",
+      "examples": [],
+      "tags": ["sre", "control-panel"]
+    }
+  ],
+  "generatedAt": "2026-07-26T00:00:00.000Z"
+}
