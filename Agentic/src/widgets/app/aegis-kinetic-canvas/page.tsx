@@ -11,7 +11,8 @@ import {
 } from 'lucide-react';
 import { AegisMcpClient, TelemetryData, SwarmEvent } from '../lib/mcpClient';
 
-const MCP_CLOUD_URL = 'https://agentic-6a6551d9-hashwins-org-0dcc4106.app.nitrocloud.ai/mcp';
+// MCP Client Transport endpoint — Uses Next.js rewrite (/api/mcp -> http://localhost:3000/mcp) to prevent CORS errors
+const MCP_ENDPOINT_URL = typeof window !== 'undefined' ? '/api/mcp' : 'http://localhost:3000/mcp';
 
 interface MetricHistoryPoint {
   time: string;
@@ -23,8 +24,8 @@ interface MetricHistoryPoint {
 }
 
 export default function AegisControlPanel() {
-  // Client instance
-  const [mcpClient] = useState(() => new AegisMcpClient(MCP_CLOUD_URL, (connected) => setIsConnected(connected)));
+  // Initialize Aegis MCP Client targeting /api/mcp JSON-RPC endpoint
+  const [mcpClient] = useState(() => new AegisMcpClient(MCP_ENDPOINT_URL, (connected) => setIsConnected(connected)));
   
   // System State
   const [isConnected, setIsConnected] = useState<boolean>(true);
