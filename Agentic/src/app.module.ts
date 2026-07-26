@@ -15,6 +15,7 @@ import { PrimeOrchestrator } from './agents/prime.orchestrator.js';
 import { AtlasSreAgent } from './agents/atlas.sre.js';
 import { CerberusSecurityAgent } from './agents/cerberus.security.js';
 import { HermesComplianceAgent } from './agents/hermes.compliance.js';
+import { LibranReconAgent } from './agents/libran.recon.js';
 
 @Module({
   name: 'AppModule',
@@ -28,13 +29,15 @@ import { HermesComplianceAgent } from './agents/hermes.compliance.js';
     PrimeOrchestrator,
     AtlasSreAgent,
     CerberusSecurityAgent,
-    HermesComplianceAgent
+    HermesComplianceAgent,
+    LibranReconAgent
   ],
   controllers: [
     PrimeOrchestrator,
     AtlasSreAgent,
     CerberusSecurityAgent,
-    HermesComplianceAgent
+    HermesComplianceAgent,
+    LibranReconAgent
   ]
 })
 export class AppModule {}

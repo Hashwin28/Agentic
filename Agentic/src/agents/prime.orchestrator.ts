@@ -12,6 +12,8 @@ import { QosShunting } from '../patterns/qos-shunting.js';
 import { exec } from 'child_process';
 import { randomUUID } from 'crypto';
 
+import { LibranReconAgent } from './libran.recon.js';
+
 // ──────────────────────────────────────────────────────────────────────────────
 // System Status State Machine
 // ──────────────────────────────────────────────────────────────────────────────
@@ -22,7 +24,7 @@ const EMERGENCY_FALLBACK_MS = 3000;
 
 @Injectable({ deps: [
   MockCBSService, IncrementalSVDEngine,
-  AtlasSreAgent, CerberusSecurityAgent, HermesComplianceAgent,
+  AtlasSreAgent, CerberusSecurityAgent, HermesComplianceAgent, LibranReconAgent,
   SingleFlightGate, IdempotencyEnforcer, QosShunting
 ] })
 export class PrimeOrchestrator {
@@ -37,6 +39,7 @@ export class PrimeOrchestrator {
     private readonly atlas: AtlasSreAgent,
     private readonly cerberus: CerberusSecurityAgent,
     private readonly hermes: HermesComplianceAgent,
+    private readonly libran: LibranReconAgent,
     private readonly singleFlight: SingleFlightGate,
     private readonly idempotency: IdempotencyEnforcer,
     private readonly qos: QosShunting
@@ -488,5 +491,45 @@ export class PrimeOrchestrator {
   @Widget('aegis-kinetic-canvas')
   async getLedgerStateTool() {
     return { accounts: this.cbs.getLedger() };
+  }
+
+  @Tool({
+    name: 'arbitrate_business_sre_consensus',
+    description: 'AEGIS-PRIME Consensus Arbitration: Evaluates multi-agent consensus between high-priority business SLAs and core SRE safety bounds during active anomaly events.',
+    inputSchema: z.object({
+      targetSlaMs: z.number().describe('Target business latency SLA in milliseconds'),
+      sreErrorThreshold: z.number().optional().describe('Maximum allowed SVD residual norm threshold (default 15.0)')
+    })
+  })
+  @Widget('aegis-kinetic-canvas')
+  async arbitrateBusinessSreConsensus(input: { targetSlaMs: number; sreErrorThreshold?: number }) {
+    const threshold = input.sreErrorThreshold ?? 15.0;
+    const currentVector = await this.getTelemetryData();
+    const analysis = this.svdEngine.processVector(currentVector);
+
+    const isWithinBounds = analysis.residualNorm <= threshold;
+    const consensusDecision = isWithinBounds
+      ? 'BUSINESS_PRIORITY_GRANTED'
+      : 'SRE_SAFETY_SHIELD_PRIORITY';
+
+    this.cbs.logEvent(
+      `[PRIME] Consensus arbitration: SLA=${input.targetSlaMs}ms, Residual=${analysis.residualNorm.toFixed(2)} → Decision: ${consensusDecision}`,
+      isWithinBounds ? 'info' : 'warn',
+      'PRIME'
+    );
+
+    return {
+      status: 'CONSENSUS_REACHED',
+      decision: consensusDecision,
+      targetSlaMs: input.targetSlaMs,
+      svdResidualNorm: analysis.residualNorm,
+      threshold,
+      activeShields: {
+        singleFlight: this.singleFlight.isActive,
+        idempotency: this.idempotency.isActive,
+        qosShunting: this.qos.isActive
+      },
+      timestamp: new Date().toISOString()
+    };
   }
 }

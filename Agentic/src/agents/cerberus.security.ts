@@ -45,4 +45,24 @@ export class CerberusSecurityAgent {
       timestamp: new Date().toISOString()
     };
   }
+
+  @Tool({
+    name: 'validate_idempotency_key',
+    description: 'CERBERUS Idempotency Key Validator: Queries idempotency_log storage cache for duplicate transaction nonces to prevent double-spending.',
+    inputSchema: z.object({
+      idempotencyKey: z.string().describe('The transaction nonce or idempotency key to validate'),
+      senderAccountId: z.string().describe('Account ID attempting the transaction')
+    })
+  })
+  @Widget('aegis-kinetic-canvas')
+  async validateIdempotencyKey(input: { idempotencyKey: string; senderAccountId: string }) {
+    const isDuplicate = this.idempotency ? this.idempotency.checkKey(input.idempotencyKey) : false;
+    return {
+      status: isDuplicate ? 'DUPLICATE_KEY_INTERCEPTED' : 'KEY_VALID',
+      idempotencyKey: input.idempotencyKey,
+      senderAccountId: input.senderAccountId,
+      isDuplicate,
+      timestamp: new Date().toISOString()
+    };
+  }
 }

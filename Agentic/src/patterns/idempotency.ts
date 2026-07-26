@@ -56,6 +56,16 @@ export class IdempotencyEnforcer {
     }
   }
 
+  checkKey(key: string): boolean {
+    const now = Date.now();
+    for (const [hash, timestamp] of this.seenHashes.entries()) {
+      if (hash.includes(key) && now - timestamp < this.ttlMs) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private cleanup() {
     const now = Date.now();
     for (const [hash, timestamp] of this.seenHashes.entries()) {
