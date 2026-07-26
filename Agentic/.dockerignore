@@ -1,0 +1,12 @@
+node_modules
+dist
+.next
+src/widgets/.next
+src/widgets/node_modules
+*.log
+.git
+.gitignore
+err.txt
+out.txt
+.nitrostudio
+.antigravity
