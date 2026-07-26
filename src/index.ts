@@ -5,6 +5,10 @@ import * as path from 'path';
 import * as fs from 'fs';
 import type { Request, Response } from 'express';
 
+// Ensure cloud container ingress binds to 0.0.0.0 for external health checks
+process.env.HOST = process.env.HOST || '0.0.0.0';
+process.env.PORT = process.env.PORT || '3000';
+
 function findWidgetHtmlFile(widgetName: string): string | null {
   const cleanName = widgetName.replace(/\.html$/, '');
   const candidatePaths = [
